@@ -24,13 +24,13 @@ enum class lifetime { singleton, transient };
 #endif
 
 template <typename TConcrete, bool auto_construct>
-class registration_builder : public container<auto_construct> {
+class registration_builder : protected container<auto_construct> {
     container<auto_construct>& parent_;
 
   public:
     explicit registration_builder(container<auto_construct>& parent)
         : parent_(parent) {
-        container<>::mutex_ = parent.mutex_;
+        this->mutex_ = parent.mutex_;
     }
 
     registration_builder(const registration_builder&)                = default;
@@ -48,10 +48,22 @@ class registration_builder : public container<auto_construct> {
         parent_.template use_constructor<TConcrete, TArgs...>();
         return parent_;
     }
-};
+
+    template <typename TInterface>
+    auto& register_factory(
+        std::function<void*()> factory_fn, lifetime lt = lifetime::singleton
+    ) {
+        // factories_[std::type_index(typeid(TInterface))] = {factory_fn, lt};
+        return parent_.template register_factory<TInterface>(factory_fn, lt);
+    }
+
+}; // class registration_builder<>
 
 template <bool auto_construct = false>
 class container {
+    template <typename TConcrete>
+    friend registration_builder<TConcrete, auto_construct>;
+
   public:
     container() = default;
     ~container() { shutdown(); }
@@ -103,10 +115,39 @@ class container {
     }
 
     template <typename TInterface>
-    container& register_factory(
-        std::function<void*()> factory_fn, lifetime lt = lifetime::singleton
+    container<auto_construct>& register_factory(
+        std::function<TInterface*()> factory_fn,
+        lifetime lt = lifetime::singleton
     ) {
         factories_[std::type_index(typeid(TInterface))] = {factory_fn, lt};
+        return *this;
+    }
+
+    template <typename TInterface>
+    container<auto_construct>& register_factory(
+        std::function<TInterface*(container&)> factory_fn,
+        lifetime lt = lifetime::singleton
+    ) {
+        factories_[std::type_index(typeid(TInterface))] = {factory_fn, lt};
+        return *this;
+    }
+
+    template <typename TInterface, typename... TDeps>
+    container<auto_construct>& register_factory(
+        std::function<TInterface*(TDeps...)> factory_fn,
+        lifetime lt = lifetime::singleton, std::tuple<TDeps...> user_args = {}
+    ) {
+        factories_[std::type_index(typeid(TInterface))] = {
+            [this, factory_fn, user_args]() -> void* {
+                return std::apply([&](auto&&... deps) {
+                    return factory_fn(
+                        resolve_dependency<std::decay_t<decltype(deps)>>()...
+                    );
+                }
+                user_args);
+            },
+            lt
+        };
         return *this;
     }
 
@@ -124,7 +165,11 @@ class container {
     }
 
     void shutdown() {
+        if (!mutex_)
+            return;
+
         std::lock_guard<std::recursive_mutex> lock(*mutex_);
+
         for (auto& [key, ptr] : singletons_) {
             delete static_cast<char*>(ptr);
         }
@@ -135,9 +180,6 @@ class container {
         }
         transients_.clear();
     }
-
-  protected:
-    std::shared_ptr<std::recursive_mutex> mutex_ = std::make_shared<std::recursive_mutex>();
 
   private:
     struct service_descriptor {
@@ -150,6 +192,8 @@ class container {
     std::unordered_map<std::type_index, std::function<void*()>>
         constructor_overrides_;
     std::vector<void*> transients_;
+    std::shared_ptr<std::recursive_mutex> mutex_ =
+        std::make_shared<std::recursive_mutex>();
 
     template <typename TInterface, typename TImpl>
     void register_impl(lifetime lt) {
@@ -366,6 +410,6 @@ class container {
         using largest_ctor_args =
             typename find_largest_ctor<filtered_ctors>::type;
     };
-};
+}; // class container<>
 
 } // namespace di
