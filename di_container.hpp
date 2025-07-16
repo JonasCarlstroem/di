@@ -29,7 +29,9 @@ class registration_builder : public container<auto_construct> {
 
   public:
     explicit registration_builder(container<auto_construct>& parent)
-        : parent_(parent) {}
+        : parent_(parent) {
+        container<>::mutex_ = parent.mutex_;
+    }
 
     registration_builder(const registration_builder&)                = default;
     registration_builder(registration_builder&&)                     = default;
@@ -54,11 +56,11 @@ class container {
     container() = default;
     ~container() { shutdown(); }
 
-    container(const container&) = delete;
+    container(const container&)            = delete;
     container& operator=(const container&) = delete;
 
     container(container&&) noexcept        = default;
-    container& operator=(const container&) = default;
+    container& operator=(container&&)      = default;
 
     // Register interface->implementation
     template <typename TInterface, typename TImpl>
@@ -92,7 +94,6 @@ class container {
                 [this](auto&&... args) -> void* {
                     return new TConcrete(
                         resolve_dependency<std::decay_t<decltype(args)>>()...
-                        // std::forward<decltype(args)>(args)...
                     );
                 },
                 resolve_tuple<std::tuple<TArgs...>>()
@@ -103,13 +104,9 @@ class container {
 
     template <typename TInterface>
     container& register_factory(
-        std::function<void*()> factory_fn,
-        lifetime lt = lifetime::singleton
+        std::function<void*()> factory_fn, lifetime lt = lifetime::singleton
     ) {
-        factories_[std::type_index(typeid(TInterface))] = {
-            factory_fn,
-            lt
-        };
+        factories_[std::type_index(typeid(TInterface))] = {factory_fn, lt};
         return *this;
     }
 
@@ -139,6 +136,9 @@ class container {
         transients_.clear();
     }
 
+  protected:
+    std::shared_ptr<std::recursive_mutex> mutex_ = std::make_shared<std::recursive_mutex>();
+
   private:
     struct service_descriptor {
         std::function<void*()> factory;
@@ -150,14 +150,14 @@ class container {
     std::unordered_map<std::type_index, std::function<void*()>>
         constructor_overrides_;
     std::vector<void*> transients_;
-    std::shared_ptr<std::recursive_mutex> mutex_;
 
     template <typename TInterface, typename TImpl>
     void register_impl(lifetime lt) {
         factories_[std::type_index(typeid(TInterface))] = {
-            [this]() -> void* { 
-                return static_cast<TInterface*>(create_instance<TImpl>()); 
-            }, lt
+            [this]() -> void* {
+                return static_cast<TInterface*>(create_instance<TImpl>());
+            },
+            lt
         };
     }
 
@@ -335,7 +335,7 @@ class container {
             return is_constructible_with<std::tuple_element_t<Is, Tuple>...>();
         }
 
-        template<typename Tuple>
+        template <typename Tuple>
         static constexpr bool is_constructible_from_tuple() {
             return is_constructible_from_tuple_impl<Tuple>(
                 std::make_index_sequence<std::tuple_size_v<Tuple>>{}
