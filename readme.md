@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
     di::provider provider = di::container()
         .register_type<abs_logger, console_logger>()
         .register_type<sample_service>()
-        .user_constructor<abs_logger>()
+        .use_constructor<abs_logger>()
         .build();
 
     sample_service* service = provider.resolve<sample_service>();
