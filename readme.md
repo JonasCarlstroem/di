@@ -67,9 +67,9 @@ di::provider register_services(int argc, char** argv) {
         .register_type<logging::logger, logging::console_logger>()
         .register_factory<cli::parser>(
             /* this lambda can contain arbitrary args that you have to pass to  the 'register_factory' method */
-            [](di::container& c, int argc, char** argv) {
+            [](di::provider& provider, int argc, char** argv) {
                 cli::parser* p = new cli::parser(
-                    c.resolve<logging::logger>()
+                    provider.resolve<logging::logger>()
                 );
 
                 register_cli_args(*p);
