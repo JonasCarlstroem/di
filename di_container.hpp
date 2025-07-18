@@ -10,6 +10,12 @@
 #include <typeindex>
 #include <unordered_map>
 
+#define typeof(Type) std::type_index(typeid(Type))
+
+//template <typename T>
+//constexpr std::type_index typeof() {
+//    return typeid(T);
+//}
 namespace di {
 
 template <bool>
@@ -25,6 +31,9 @@ enum class lifetime { singleton, transient };
 
 template <typename TConcrete, bool auto_construct>
 class registration_builder : protected container<auto_construct> {
+    template <typename TInterface>
+    using factory_function = TInterface*(container<auto_construct>&);
+
     container<auto_construct>& parent_;
 
   public:
@@ -54,11 +63,27 @@ class registration_builder : protected container<auto_construct> {
         return parent_.template register_factory<TInterface>(factory_fn, lt);
     }
 
+    template<typename TInterface>
+    container<auto_construct>& register_factory(factory_function<TInterface> factory_fn, lifetime lt = lifetime::singleton) {
+        return parent_.template register_factory<TInterface>(factory_fn, lt);
+    }
+
+    //template <typename TInterface, typename TFactory, typename... TDeps>
+    //container<auto_construct>& register_factory(TFactory&& factory_fn,
+    //                                            lifetime lt = lifetime::singleton,
+    //                                            std::tuple<TDeps...> user_args = {}) {
+    //    return parent_.template register_factory<TInterface, TFactory, TDeps...>(
+    //        std::move(factory_fn), lt, user_args);
+    //}
+
 }; // class registration_builder<>
 
 template <bool auto_construct = false>
 class container {
-    template<typename, bool>
+    template <typename TInterface>
+    using factory_function = TInterface*(container<auto_construct>&);
+
+    template <typename, bool>
     friend class registration_builder;
 
   public:
@@ -92,6 +117,7 @@ class container {
     // Explicit constructor override
     template <typename TConcrete, typename... TArgs>
     container& use_constructor() {
+        /*static_assert(std::i)*/
         constructor_overrides_[std::type_index(typeid(TConcrete))] = [this]() {
             return std::apply(
                 [this](auto&&... args) -> void* {
@@ -116,17 +142,32 @@ class container {
         return *this;
     }
 
-    template <typename TInterface, typename... TDeps, typename TFactory>
-    container<auto_construct>& register_factory(TFactory&& factory_fn,
-                                                lifetime lt = lifetime::singleton,
-                                                std::tuple<TDeps...> user_args = {}) {
-        factories_[std::type_index(typeid(TInterface))] = {
-          [this, f = std::forward<TFactory>(factory_fn), user_args]() -> void* {
-              return invoke_factory<TInterface>(f, user_args);
-          },
+    template <typename TInterface>
+    container<auto_construct>&
+    register_factory(factory_function<TInterface> factory_fn, lifetime lt = lifetime::singleton) {
+        factories_[typeof<TInterface>()] = {
+          [this, factory_fn]() { return static_cast<void*>(factory_fn(*this)); },
           lt};
+
         return *this;
     }
+
+    //template <typename TInterface, typename TFactory, typename... TDeps>
+    //container<auto_construct>& register_factory(TFactory&& factory_fn,
+    //                                            lifetime lt = lifetime::singleton,
+    //                                            std::tuple<TDeps...> user_args = {}) {
+    //    factories_[typeof<TInterface>()] = {
+    //      [this, f = std::forward<TFactory>(factory_fn),
+    //       user_args = std::move(user_args)]() mutable -> void* {
+    //          auto wrapped_factory = [&f](auto&&... args) -> TInterface* {
+    //              return f(std::forward<decltype(args)>(args)...);
+    //          };
+
+    //          return invoke_factory<TInterface>(wrapped_factory, user_args);
+    //      },
+    //      lt};
+    //    return *this;
+    //}
 
     // Resolve ptr
     template <typename T>
@@ -206,12 +247,12 @@ class container {
         }
     }
 
-    //template<typename TInterface, typename TFactory, typename... TUserArgs>
-    //void* invoke_factory(TFactory& f, std::tuple<TUserArgs...>& user_args) {
-    //    return std::apply([&](auto&&... user) { return f(resolve_dependency<cli)
-    //    }
-    //    )
-    //}
+    // template<typename TInterface, typename TFactory, typename... TUserArgs>
+    // void* invoke_factory(TFactory& f, std::tuple<TUserArgs...>& user_args) {
+    //     return std::apply([&](auto&&... user) { return f(resolve_dependency<cli)
+    //     }
+    //     )
+    // }
 
     template <typename T>
     T* create_instance() {
@@ -287,16 +328,36 @@ class container {
         return resolve_tuple_impl<Tuple>(std::make_index_sequence<std::tuple_size_v<Tuple>>{});
     }
 
-    template<typename TInterface, typename TFactory, typename... TUserArgs>
-    void* invoke_factory(TFactory& f, std::tuple<TUserArgs...>& user_args) {
-        using factory_traits = function_traits<std::decay_t<TFactory>>;
+    template <typename TInterface, typename TFactory, typename TUserArgs>
+    void* invoke_factory(TFactory& f, TUserArgs& user_args) {
+        auto resolved_deps = resolve_dependencies<TFactory>();
+        auto all_args      = std::tuple_cat(std::move(resolved_deps), std::move(user_args));
 
-        constexpr size_t dep_count = factory_traits::arity - sizeof...(TUserArgs);
+        // decltype(auto) ptr = std::apply(f, std::move(all_args));
+        // auto* ptr = (f)(std::get<TUserArgs>(all_args));
+        using factory_return_t = decltype(apply_with_index(f, all_args));
 
-        return invoke_factory_impl<TInterface, dep_count>(f, user_args);
+        static_assert(std::is_pointer_v<factory_return_t>,
+                      "Factory function must return a pointer");
+        static_assert(std::is_convertible_v<factory_return_t, TInterface*>,
+                      "Return type must match interface");
+
+        auto ptr = apply_with_index(f, all_args);
+        return static_cast<void*>(ptr);
     }
 
-    template<typename TInterface, size_t DepCount, typename TFactory, typename... TUserArgs>
+    template <typename TInterface, typename TFactory, typename... TArgs>
+    void* invoke_factory_fallback(TFactory& f, std::tuple<TArgs...>& args) {
+        auto ptr = f(std::get<TArgs>(args)...);
+
+        static_assert(std::is_pointer_v<decltype(ptr)>, "Factory must return pointer");
+        static_assert(std::is_convertible_v<decltype(ptr), TInterface*>,
+                      "Return type must match interface");
+
+        return static_cast<void*>(ptr);
+    }
+
+    template <typename TInterface, size_t DepCount, typename TFactory, typename... TUserArgs>
     void* invoke_factory_impl(TFactory& f, std::tuple<TUserArgs...>& user_args) {
         return invoke_factory_with_deps<TInterface>(
             f,
@@ -304,13 +365,24 @@ class container {
             user_args);
     }
 
-    template<typename TInterface, typename TFactory, typename DepTuple, typename UserTuple>
+    template <typename TInterface, typename TFactory, typename DepTuple, typename UserTuple>
     void* invoke_factory_with_deps(TFactory& f, DepTuple& deps, UserTuple& user_args) {
         return std::apply(
             [&](auto&&... all_args) -> void* {
                 return static_cast<void*>(f(std::forward<decltype(all_args)>(all_args)...));
             },
             std::tuple_cat(deps, user_args));
+    }
+
+    template <typename TFactory, typename Tuple, size_t... Is>
+    auto apply_with_index_impl(TFactory& f, Tuple& t, std::index_sequence<Is...>) {
+        return f(std::get<Is>(t)...);
+    }
+
+    template <typename TFactory, typename Tuple>
+    auto apply_with_index(TFactory& f, Tuple& t) {
+        constexpr size_t size = std::tuple_size_v<std::decay_t<Tuple>>;
+        return apply_with_index_impl(f, t, std::make_index_sequence<size>{});
     }
 
     template <typename U>
@@ -326,15 +398,22 @@ class container {
         }
     }
 
-    template<typename Tuple, std::size_t... Is>
+    template <typename Tuple, std::size_t... Is>
     auto resolve_dependencies_impl(std::index_sequence<Is...>) {
         return std::make_tuple(resolve_dependency<std::tuple_element_t<Is, Tuple>>()...);
     }
 
-    template <typename Tuple>
+    // template <typename Tuple>
+    // auto resolve_dependencies() {
+    //     return resolve_dependencies_impl<Tuple>(
+    //         std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+    // }
+
+    template <typename TFactory>
     auto resolve_dependencies() {
-        return resolve_dependencies_impl<Tuple>(
-            std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+        using arg_types = typename function_traits<std::decay_t<TFactory>>::args_tuple;
+        // return resolve_dependencies_impl(&TFactory::operator());
+        return resolve_tuple<arg_types>();
     }
 
     template <typename T>
@@ -414,18 +493,20 @@ class container {
         using largest_ctor_args = typename find_largest_ctor<filtered_ctors>::type;
     }; // class constructor_traits<>
 
-    template<typename>
+    template <typename>
     struct function_traits;
 
-    template<typename R, typename... Args>
+    template <typename R, typename... Args>
     struct function_traits<R(Args...)> {
         using result_type = R;
 
-        template<size_t I>
+        template <size_t I>
         using arg = std::tuple_element_t<I, std::tuple<Args...>>;
 
-        template<size_t From, size_t Count>
-        using args = std::tuple_element_t<From, std::tuple<Args...>>;
+        template <size_t From, size_t Count>
+        using args                    = std::tuple_element_t<From, std::tuple<Args...>>;
+
+        using args_tuple              = std::tuple<std::decay_t<Args>...>;
 
         static constexpr size_t arity = sizeof...(Args);
     };
