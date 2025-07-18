@@ -1,39 +1,22 @@
 #pragma once
 
-#include "di_container2.hpp"
+#include "di_container.hpp"
 
 namespace di {
 
-template <bool auto_construct = false>
 class provider {
+    friend container;
+
   public:
-    explicit provider(container<auto_construct>& cont) : container_(cont) {}
+    explicit provider(container* cont) : container_(cont) {}
 
     template <typename T>
-    T* get() {
-        // return
+    T* resolve() {
+        return container_->template resolve_impl<T>();
     }
 
   private:
-    container<auto_construct>& container_;
-
-    template<typename T>
-    T* resolve_impl() {
-        if (auto instance = container_.try_resolve<T>()) {
-            return instance;
-        }
-
-        if constexpr (auto_construct && !std::is_abstract_v<T>) {
-            return create_instance<T>();
-        } else {
-            DI_THROW_OR_ASSERT("Type not registered and cannot auto-construct");
-        }
-    }
-
-    template<typemane T>
-    T* create_instance() {
-
-    }
+    container* container_;
 };
 
 } // namespace di
