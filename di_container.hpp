@@ -4,6 +4,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <tuple>
 #include <type_traits>
@@ -56,7 +57,7 @@ class registration_builder {
     }
 
     template <typename... TArgs>
-    container& use_constructor() {
+    std::shared_ptr<container> use_constructor() {
         if (parent_.is_built_) throw std::runtime_error("Provider has already been built.");
         return parent_.template use_constructor<TConcrete, TArgs...>();
     }
@@ -64,7 +65,7 @@ class registration_builder {
     template <
         typename TInterface,
         typename... TArgs>
-    container& register_factory(
+    std::shared_ptr<container> register_factory(
         factory_function_t<
             TInterface,
             TArgs...> factory_fn,
@@ -78,23 +79,42 @@ class registration_builder {
 }; // class registration_builder<>
 
 class container : public std::enable_shared_from_this<container> {
-    template<typename TConcrete>
+    template <typename TConcrete>
     friend class registration_builder;
 
     friend provider;
 
-  public:
+    static inline std::set<container*> all_containers;
+
+  private:
     container() = default;
 
     ~container() { shutdown(); }
 
+  public:
     container(const container&)            = delete;
     container& operator=(const container&) = delete;
 
     container(container&&)                 = delete;
     container& operator=(container&&)      = delete;
 
-    // Register interface->implementation
+    /// <summary>
+    /// Convenience method, either use this or do it manually 'std::make_shared<container>()'
+    /// </summary>
+    /// <returns>A new container</returns>
+    static container& create() {
+        auto ptr = new container();
+        all_containers.insert(ptr);
+        return *ptr;
+    }
+
+    /// <summary>
+    /// Register interface with backing concrete implementation
+    /// </summary>
+    /// <typeparam name="TInterface">Resolvable abstract type</typeparam>
+    /// <typeparam name="TImpl">Concrete implementation of TInterface</typeparam>
+    /// <param name="lt">Service lifetime</param>
+    /// <returns>A registration builder (convenience struct for picking the constructor)</returns>
     template <
         typename TInterface,
         typename TImpl>
@@ -106,7 +126,13 @@ class container : public std::enable_shared_from_this<container> {
         return registration_builder<TImpl>(*this);
     }
 
-    // Register concrete type
+    /// <summary>
+    /// Register concrete type. If the type has a constructor with arguments, you must specify the
+    /// constructor manually using 'use_constructor'.
+    /// </summary>
+    /// <typeparam name="TConcrete">The concrete type to register</typeparam>
+    /// <param name="lt">Service lifetime</param>
+    /// <returns>A registration builder (convenience struct for picking the constructor)</returns>
     template <typename TConcrete>
     registration_builder<TConcrete>& register_type(lifetime lt = lifetime::singleton) {
         if (is_built_) throw std::runtime_error("Provider has already been built.");
@@ -120,7 +146,12 @@ class container : public std::enable_shared_from_this<container> {
         return registration_builder<TConcrete>(*this);
     }
 
-    // Pick constructor to use (I.E, some_ns::some_cls::some_cls(logger*, parser*) <- = use_constructor<some_ns::some_cls, logger*, parser*>())
+    /// <summary>
+    /// Pick constructor with TArgs... parameters for TConcrete
+    /// </summary>
+    /// <typeparam name="TConcrete">The registered type for which to pick constructor</typeparam>
+    /// <typeparam name="...TArgs">Argument types in the exact order as the constructor to
+    /// pick</typeparam> <returns>This container</returns>
     template <
         typename TConcrete,
         typename... TArgs>
@@ -130,25 +161,24 @@ class container : public std::enable_shared_from_this<container> {
         constructor_overrides_[typeof(TConcrete)] = [](provider& p) {
             return std::apply(
                 [&p](auto&&... args) -> void* {
-                    return new TConcrete(p.container_->resolve_dependency<std::decay_t<decltype(args)>>()...);
+                    return new TConcrete(
+                        p.container_->resolve_dependency<std::decay_t<decltype(args)>>(p)...
+                    );
                 },
-                p.container_->resolve_tuple<std::tuple<TArgs...>>()
+                p.container_->resolve_tuple<std::tuple<TArgs...>>(p)
             );
         };
         return *this;
     }
 
-    // Register factory for TInterface
-
     /// <summary>
     /// Register factory for TInterface
     /// </summary>
     /// <typeparam name="TInterface">Service type</typeparam>
-    /// <typeparam name="...TUserArgs">Optional arguments for factory</typeparam>
-    /// <param name="factory_fn">Factory for type</param>
-    /// <param name="lt"></param>
-    /// <param name="...user_args"></param>
-    /// <returns></returns>
+    /// <typeparam name="...TUserArgs">Variadic type parameter for optional factory
+    /// arguments</typeparam> <param name="factory_fn">Factory for type</param> <param
+    /// name="lt">Service lifetime</param> <param name="...user_args">[Optional] arguments for
+    /// factory.</param> <returns>This container</returns>
     template <
         typename TInterface,
         typename... TUserArgs>
@@ -174,7 +204,7 @@ class container : public std::enable_shared_from_this<container> {
           [factory_fn,
            user_args_tuple =
                std::make_tuple(std::forward<TUserArgs>(user_args)...)](provider& p) -> void* {
-              return p.container_->invoke_factory<TInterface>(factory_fn, user_args_tuple);
+              return p.container_->invoke_factory<TInterface>(p, factory_fn, user_args_tuple);
           },
           lt
         };
@@ -182,14 +212,11 @@ class container : public std::enable_shared_from_this<container> {
         return *this;
     }
 
-    std::shared_ptr<provider> build() {
-        if (is_built_) throw std::runtime_error("Provider has already been built.");
-
-        is_built_ = true;
-
-        auto self = shared_from_this();
-        return std::make_shared<provider>(self);
-    }
+    /// <summary>
+    /// Build the provider, container can no longer register new types.
+    /// </summary>
+    /// <returns>The built provider</returns>
+    provider& build();
 
     void shutdown() {
         if (!mutex_) return;
@@ -227,14 +254,14 @@ class container : public std::enable_shared_from_this<container> {
     void register_impl(lifetime lt) {
         factories_[typeof(TInterface)] = service_descriptor {
           [](provider& p) -> void* {
-              return static_cast<TInterface*>(p.container_->create_instance<TImpl>());
+              return static_cast<TInterface*>(p.container_->create_instance<TImpl>(p));
           },
           lt
         };
     }
 
     template <typename T>
-    T* resolve_impl() {
+    T* resolve_impl(provider& provider_instance) {
         if (!is_built_) throw std::runtime_error("Provider has not yet been built.");
 
         auto it = factories_.find(typeof(T));
@@ -246,25 +273,25 @@ class container : public std::enable_shared_from_this<container> {
         if (descriptor.life == lifetime::singleton) {
             auto singleton_it = singletons_.find(typeof(T));
             if (singleton_it == singletons_.end()) {
-                auto instance          = (T*)(descriptor.factory(*provider_instance));
+                auto instance          = (T*)(descriptor.factory(provider_instance));
                 singletons_[typeof(T)] = instance;
                 return instance;
             }
             return static_cast<T*>(singleton_it->second);
         } else {
-            T* instance = (T*)(descriptor.factory(*provider_instance));
+            T* instance = (T*)(descriptor.factory(provider_instance));
             transients_.push_back(instance);
             return instance;
         }
     }
 
     template <typename T>
-    T* create_instance() {
+    T* create_instance(provider& provider_instance) {
         if (!is_built_) throw std::runtime_error("Provider has not yet been built!");
 
         auto override_it = constructor_overrides_.find(typeof(T));
         if (override_it != constructor_overrides_.end()) {
-            auto obj = override_it->second(*provider_instance);
+            auto obj = override_it->second(provider_instance);
             return static_cast<T*>(obj);
         }
 
@@ -315,13 +342,21 @@ class container : public std::enable_shared_from_this<container> {
     template <
         typename Tuple,
         std::size_t... Is>
-    auto resolve_tuple_impl(std::index_sequence<Is...>) {
-        return std::make_tuple(resolve_dependency<std::tuple_element_t<Is, Tuple>>()...);
+    auto resolve_tuple_impl(
+        provider& provider_instance,
+        std::index_sequence<Is...>
+    ) {
+        return std::make_tuple(
+            resolve_dependency<std::tuple_element_t<Is, Tuple>>(provider_instance)...
+        );
     }
 
     template <typename Tuple>
-    auto resolve_tuple() {
-        return resolve_tuple_impl<Tuple>(std::make_index_sequence<std::tuple_size_v<Tuple>> {});
+    auto resolve_tuple(provider& provider_instance) {
+        return resolve_tuple_impl<Tuple>(
+            provider_instance,
+            std::make_index_sequence<std::tuple_size_v<Tuple>> {}
+        );
     }
 
     template <
@@ -329,13 +364,14 @@ class container : public std::enable_shared_from_this<container> {
         typename TFactory,
         typename TUserArgs>
     void* invoke_factory(
+        provider& provider_instance,
         TFactory& f,
         TUserArgs& user_args
     ) {
         if (!is_built_) throw std::runtime_error("Provider has not yet been built.");
         auto result = std::apply(
             [&](auto&&... args) {
-                return f(*provider_instance, std::forward<decltype(args)>(args)...);
+                return f(provider_instance, std::forward<decltype(args)>(args)...);
             },
             user_args
         );
@@ -364,15 +400,15 @@ class container : public std::enable_shared_from_this<container> {
     }
 
     template <typename U>
-    auto resolve_dependency() {
+    auto resolve_dependency(provider& provider_instance) {
         if constexpr (std::is_pointer_v<U>) {
             using Pointee = std::remove_pointer_t<U>;
-            return resolve_impl<Pointee>(); // returns raw pointer
+            return resolve_impl<Pointee>(provider_instance); // returns raw pointer
         } else if constexpr (std::is_reference_v<U>) {
             using RefType = std::remove_reference_t<U>;
-            return *resolve_impl<RefType>(); // returns reference
+            return *resolve_impl<RefType>(provider_instance); // returns reference
         } else {
-            return resolve_impl<U>(); // returns shared_ptr<T>
+            return resolve_impl<U>(provider_instance); // returns shared_ptr<T>
         }
     }
 
@@ -500,3 +536,15 @@ class container : public std::enable_shared_from_this<container> {
 }; // class container
 
 } // namespace di
+
+#include "di_provider.hpp"
+
+namespace di {
+    inline provider& container::build() {
+        if (is_built_) throw std::runtime_error("Provider has already been built.");
+
+        is_built_ = true;
+        return provider::create_provider(shared_from_this());
+    }
+}
+
