@@ -12,10 +12,6 @@
 
 #define typeof(Type) std::type_index(typeid(Type))
 
-// template <typename T>
-// constexpr std::type_index typeof() {
-//     return typeid(T);
-// }
 namespace di {
 
 class container;
@@ -55,11 +51,13 @@ class registration_builder {
 
     template <typename UConcrete>
     auto& register_type(lifetime lt = lifetime::singleton) {
+        if (parent_.is_built_) throw std::runtime_error("Provider has already been built.");
         return parent_.template register_type<UConcrete>(lt);
     }
 
     template <typename... TArgs>
     container& use_constructor() {
+        if (parent_.is_built_) throw std::runtime_error("Provider has already been built.");
         return parent_.template use_constructor<TConcrete, TArgs...>();
     }
 
@@ -73,14 +71,17 @@ class registration_builder {
         lifetime lt = lifetime::singleton,
         TArgs... args
     ) {
+        if (parent_.is_built_) throw std::runtime_error("Provider has already been built.");
         return parent_.template register_factory<TInterface, TArgs...>(factory_fn, lt, args...);
     }
 
 }; // class registration_builder<>
 
-class container {
+class container : public std::enable_shared_from_this<container> {
+    template<typename TConcrete>
+    friend class registration_builder;
+
     friend provider;
-    inline static std::shared_ptr<provider> provider_instance;
 
   public:
     container() = default;
@@ -98,6 +99,8 @@ class container {
         typename TInterface,
         typename TImpl>
     registration_builder<TImpl>& register_type(lifetime lt = lifetime::singleton) {
+        if (is_built_) throw std::runtime_error("Provider has already been built.");
+
         static_assert(std::is_base_of_v<TInterface, TImpl>, "TImpl must derive from TInterface");
         register_impl<TInterface, TImpl>(lt);
         return registration_builder<TImpl>(*this);
@@ -106,8 +109,7 @@ class container {
     // Register concrete type
     template <typename TConcrete>
     registration_builder<TConcrete>& register_type(lifetime lt = lifetime::singleton) {
-        std::cout << "container at " << this << "\n";
-        std::cout << "constructor_overrides_ at " << &constructor_overrides_ << "\n";
+        if (is_built_) throw std::runtime_error("Provider has already been built.");
 
         static_assert(
             !std::is_abstract_v<TConcrete>,
@@ -118,10 +120,13 @@ class container {
         return registration_builder<TConcrete>(*this);
     }
 
+    // Pick constructor to use (I.E, some_ns::some_cls::some_cls(logger*, parser*) <- = use_constructor<some_ns::some_cls, logger*, parser*>())
     template <
         typename TConcrete,
         typename... TArgs>
     container& use_constructor() {
+        if (is_built_) throw std::runtime_error("Provider has already been built.");
+
         constructor_overrides_[typeof(TConcrete)] = [](provider& p) {
             return std::apply(
                 [&p](auto&&... args) -> void* {
@@ -133,6 +138,17 @@ class container {
         return *this;
     }
 
+    // Register factory for TInterface
+
+    /// <summary>
+    /// Register factory for TInterface
+    /// </summary>
+    /// <typeparam name="TInterface">Service type</typeparam>
+    /// <typeparam name="...TUserArgs">Optional arguments for factory</typeparam>
+    /// <param name="factory_fn">Factory for type</param>
+    /// <param name="lt"></param>
+    /// <param name="...user_args"></param>
+    /// <returns></returns>
     template <
         typename TInterface,
         typename... TUserArgs>
@@ -143,6 +159,8 @@ class container {
         lifetime lt = lifetime::singleton,
         TUserArgs... user_args
     ) {
+        if (is_built_) throw std::runtime_error("Provider has already been built.");
+
         static_assert(
             std::is_invocable_r_v<
                 TInterface*,
@@ -165,11 +183,12 @@ class container {
     }
 
     std::shared_ptr<provider> build() {
-        if (!provider_instance) {
-            provider_instance = std::make_shared<provider>(this);
-        }
+        if (is_built_) throw std::runtime_error("Provider has already been built.");
 
-        return provider_instance;
+        is_built_ = true;
+
+        auto self = shared_from_this();
+        return std::make_shared<provider>(self);
     }
 
     void shutdown() {
@@ -198,7 +217,9 @@ class container {
     std::unordered_map<std::type_index, void*> singletons_ {};
     std::unordered_map<std::type_index, std::function<void*(provider&)>> constructor_overrides_ {};
     std::vector<void*> transients_;
+
     std::shared_ptr<std::recursive_mutex> mutex_ = std::make_shared<std::recursive_mutex>();
+    bool is_built_                               = false;
 
     template <
         typename TInterface,
@@ -214,7 +235,7 @@ class container {
 
     template <typename T>
     T* resolve_impl() {
-        if (!provider_instance) throw std::runtime_error("Provider has not yet been built.");
+        if (!is_built_) throw std::runtime_error("Provider has not yet been built.");
 
         auto it = factories_.find(typeof(T));
         if (it == factories_.end()) {
@@ -239,7 +260,7 @@ class container {
 
     template <typename T>
     T* create_instance() {
-        if (!provider_instance) throw std::runtime_error("Provider has not yet been built!");
+        if (!is_built_) throw std::runtime_error("Provider has not yet been built!");
 
         auto override_it = constructor_overrides_.find(typeof(T));
         if (override_it != constructor_overrides_.end()) {
@@ -272,13 +293,6 @@ class container {
         );
     }
 
-    //template <typename T>
-    //T* construct_with_best_ctor() {
-    //    using ctor_list = typename constructor_traits<T>::ctor_args_list;
-
-    //    return try_ctors<T, ctor_list>();
-    //}
-
     template <
         typename T,
         typename TupleList,
@@ -297,17 +311,6 @@ class container {
             return nullptr;
         }
     }
-
-    //template <typename Tuple>
-    //constexpr bool are_resolvable() {
-    //    return (can_resolve<std::tuple_element_t<0, Tuple>>() && ...);
-    //}
-
-    //template <typename U>
-    //constexpr bool can_resolve() {
-    //    return std::is_default_constructible_v<U> ||
-    //           (factories_.find(std::type_index(typeid(U))) != factories_.end());
-    //}
 
     template <
         typename Tuple,
@@ -329,7 +332,7 @@ class container {
         TFactory& f,
         TUserArgs& user_args
     ) {
-        if (!provider_instance) throw std::runtime_error("Provider has not yet been built.");
+        if (!is_built_) throw std::runtime_error("Provider has not yet been built.");
         auto result = std::apply(
             [&](auto&&... args) {
                 return f(*provider_instance, std::forward<decltype(args)>(args)...);
@@ -348,59 +351,6 @@ class container {
         return static_cast<void*>(result);
     }
 
-    //template <
-    //    typename TInterface,
-    //    typename TFactory,
-    //    typename... TArgs>
-    //void* invoke_factory_fallback(
-    //    TFactory& f,
-    //    std::tuple<TArgs...>& args
-    //) {
-    //    auto ptr = f(std::get<TArgs>(args)...);
-
-    //    static_assert(std::is_pointer_v<decltype(ptr)>, "Factory must return pointer");
-    //    static_assert(
-    //        std::is_convertible_v<decltype(ptr), TInterface*>,
-    //        "Return type must match interface"
-    //    );
-
-    //    return static_cast<void*>(ptr);
-    //}
-
-    //template <
-    //    typename TInterface,
-    //    size_t DepCount,
-    //    typename TFactory,
-    //    typename... TUserArgs>
-    //void* invoke_factory_impl(
-    //    TFactory& f,
-    //    std::tuple<TUserArgs...>& user_args
-    //) {
-    //    return invoke_factory_with_deps<TInterface>(
-    //        f,
-    //        resolve_dependencies<typename function_traits<TFactory>::template args<0, DepCount>>(),
-    //        user_args
-    //    );
-    //}
-
-    //template <
-    //    typename TInterface,
-    //    typename TFactory,
-    //    typename DepTuple,
-    //    typename UserTuple>
-    //void* invoke_factory_with_deps(
-    //    TFactory& f,
-    //    DepTuple& deps,
-    //    UserTuple& user_args
-    //) {
-    //    return std::apply(
-    //        [&](auto&&... all_args) -> void* {
-    //            return static_cast<void*>(f(std::forward<decltype(all_args)>(all_args)...));
-    //        },
-    //        std::tuple_cat(deps, user_args)
-    //    );
-    //}
-
     template <
         typename TFactory,
         typename Tuple,
@@ -412,17 +362,6 @@ class container {
     ) {
         return f(std::get<Is>(t)...);
     }
-
-    //template <
-    //    typename TFactory,
-    //    typename Tuple>
-    //auto apply_with_index(
-    //    TFactory& f,
-    //    Tuple& t
-    //) {
-    //    constexpr size_t size = std::tuple_size_v<std::decay_t<Tuple>>;
-    //    return apply_with_index_impl(f, t, std::make_index_sequence<size> {});
-    //}
 
     template <typename U>
     auto resolve_dependency() {
@@ -444,16 +383,9 @@ class container {
         return std::make_tuple(resolve_dependency<std::tuple_element_t<Is, Tuple>>()...);
     }
 
-    // template <typename Tuple>
-    // auto resolve_dependencies() {
-    //     return resolve_dependencies_impl<Tuple>(
-    //         std::make_index_sequence<std::tuple_size_v<Tuple>>{});
-    // }
-
     template <typename TFactory>
     auto resolve_dependencies() {
         using arg_types = typename function_traits<std::decay_t<TFactory>>::args_tuple;
-        // return resolve_dependencies_impl(&TFactory::operator());
         return resolve_tuple<arg_types>();
     }
 
@@ -554,7 +486,7 @@ class container {
         using args_tuple              = std::tuple<std::decay_t<Args>...>;
 
         static constexpr size_t arity = sizeof...(Args);
-    };
+    }; // struct function_traits<>
 
     template <typename R, typename... Args>
     struct function_traits<R (*)(Args...)> : function_traits<R(Args...)> {};
@@ -565,6 +497,6 @@ class container {
     template <typename T>
     struct function_traits : function_traits<decltype(&T::operator())> {};
 
-}; // namespace di
+}; // class container
 
 } // namespace di
