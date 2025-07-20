@@ -62,8 +62,11 @@ void register_cli_args(cli::parser& parser) {
     parser.add_global_argument(some_arg2)
 }
 
-di::provider register_services(int argc, char** argv) {
-    return di::container()
+di::provider& register_services(int argc, char** argv) {
+    // di::container::create internally instantiates a container on the heap,
+    // stores it statically, and returns a reference. The container manages 
+    // all the resources.
+    return di::container::create() 
         .register_type<logging::logger, logging::console_logger>()
         .register_factory<cli::parser>(
             /* this lambda can contain arbitrary args that you have to pass to  the 'register_factory' method */
@@ -80,7 +83,7 @@ di::provider register_services(int argc, char** argv) {
             di::lifetime::singleton,
             argc, argv // arbitrary param count after 'lifetime'. Must match lambdas signature
         )
-        .build();
+        .build(); // Returns a reference to the provider
 }
 
 int main(int argc, char** argv) {

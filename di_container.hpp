@@ -57,7 +57,7 @@ class registration_builder {
     }
 
     template <typename... TArgs>
-    std::shared_ptr<container> use_constructor() {
+    container& use_constructor() {
         if (parent_.is_built_) throw std::runtime_error("Provider has already been built.");
         return parent_.template use_constructor<TConcrete, TArgs...>();
     }
@@ -65,7 +65,7 @@ class registration_builder {
     template <
         typename TInterface,
         typename... TArgs>
-    std::shared_ptr<container> register_factory(
+    container& register_factory(
         factory_function_t<
             TInterface,
             TArgs...> factory_fn,
@@ -81,15 +81,15 @@ class registration_builder {
 class container : public std::enable_shared_from_this<container> {
     template <typename TConcrete>
     friend class registration_builder;
-
     friend provider;
 
-    static inline std::set<container*> all_containers;
+    static inline std::set<std::shared_ptr<container>> all_containers;
 
   private:
-    container() = default;
 
-    ~container() { shutdown(); }
+    container() noexcept = default;
+
+    ~container() noexcept { shutdown(); }
 
   public:
     container(const container&)            = delete;
@@ -103,7 +103,8 @@ class container : public std::enable_shared_from_this<container> {
     /// </summary>
     /// <returns>A new container</returns>
     static container& create() {
-        auto ptr = new container();
+        struct shared_container : public container {};
+        auto ptr = std::make_shared<shared_container>();
         all_containers.insert(ptr);
         return *ptr;
     }
@@ -535,16 +536,34 @@ class container : public std::enable_shared_from_this<container> {
 
 }; // class container
 
+class provider {
+    friend container;
+    static inline std::set<provider*> providers_;
+    std::shared_ptr<container> container_;
+
+    explicit provider(std::shared_ptr<container> cont)
+        : container_(std::move(cont)) {}
+
+    static provider& create_provider(std::shared_ptr<container> cont) {
+        auto ptr = new provider(cont);
+        providers_.insert(ptr);
+        return *ptr;
+    }
+
+  public:
+    ~provider() { providers_.erase(this); }
+
+    template <typename T>
+    T* resolve() {
+        return container_->template resolve_impl<T>(*this);
+    }
+}; // class provider
+
 } // namespace di
 
-#include "di_provider.hpp"
+inline di::provider& di::container::build() {
+    if (is_built_) throw std::runtime_error("Provider has already been built.");
 
-namespace di {
-    inline provider& container::build() {
-        if (is_built_) throw std::runtime_error("Provider has already been built.");
-
-        is_built_ = true;
-        return provider::create_provider(shared_from_this());
-    }
+    is_built_ = true;
+    return provider::create_provider(shared_from_this());
 }
-
